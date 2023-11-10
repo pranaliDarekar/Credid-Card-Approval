@@ -1,0 +1,235 @@
+## ##Credit Card Approval Prediction using ML
+
+# ##using R environment
+
+```{r}
+# Load the data.table package if you haven't already
+library(data.table)
+library(readxl)
+```
+
+```{r}
+# Uploading data
+data = application_record
+record = credit_record
+```
+
+```{r}
+# Convert 'data' and 'record' to data.table
+setDT(data)
+setDT(record)
+
+```
+
+```{r}
+# Calculate the begining month for each user
+begin_month = record[,.(begin_month=min(MONTHS_BALANCE)), by = ID]
+```
+
+```{r}
+# Merge with the data using data.table's syntax
+new_data <- merge(data,begin_month, by = 'ID')
+new_data
+```
+
+Generally, users in risk should be in 3%, thus I choose users who overdue for more than 60 days as target risk users. Those samples are marked as '1', else are '0'.
+
+```{r}
+# Define 'dep_value' based on 'STATUS' column
+record[, dep_value := FALSE]
+record[STATUS %in% c('2', '3', '4', '5'), dep_value := TRUE]
+
+```
+
+```{r}
+# Calculate the count of 'dep_value' for each 'ID'
+cpunt <- record[, .(dep_value = ifelse(sum(dep_value == TRUE) > 0, TRUE, FALSE)), by = ID]
+# Merge 'cpunt' with 'new_data'
+new_data <- merge(new_data, cpunt, by = "ID", all.x = FALSE)
+# Create 'target' column and convert to integers
+new_data[, target := as.integer(dep_value)]
+# Calculate value counts
+table(cpunt$dep_value)
+# Calculate normalized value counts
+prop.table(table(cpunt$dep_value))
+
+```
+
+Re-naming the columns
+
+```{r}
+names(new_data) <- c("id","gender","car","reality", "childno.", "inc","inctp","edutp","famtp","houtp","days_birth",     "days_employed","mobile","wkphone","phone","email",        "occtp","famsize","begin_month","dep_value","target")
+```
+
+Cleaning the new_data
+
+```{r}
+
+# Replace "NULL" values with NA
+new_data[new_data == "NULL"] <- NA
+# Remove rows with NAs
+new_data = new_data[complete.cases(new_data)]
+
+
+```
+
+```{r}
+# Create a data frame ivtable with 'variable' column
+ivtable <- data.frame(variable = colnames(new_data))
+
+# Add an 'IV' column with NULL values
+ivtable$IV <- NULL
+
+# Define a list of column names to remove
+namelist <- c('FLAG_MOBIL', 'begin_month', 'dep_value', 'target', 'ID')
+
+# Remove rows where 'variable' is in namelist
+ivtable <- subset(ivtable, !(variable %in% namelist))
+
+
+```
+
+-   Define `calc_iv` function to [calculate](https://www.kaggle.com/puremath86/iv-woe-starter-for-python) Information Value and WOE Value
+
+```{r}
+calc_iv <- function(df, feature, target, pr = FALSE) {
+  unique_values <- unique(df[[feature]])
+  df <- df[, .(All = .N,
+               Good = sum(get(target) == 0),
+               Bad = sum(get(target) == 1)),
+          by = .(Value = get(feature))]
+
+  df <- df[, c('Share', 'Bad Rate', 'Distribution Good', 'Distribution Bad', 'WoE') :=
+              .(All / sum(All),
+                Bad / All,
+                (All - Bad) / sum(All - Bad),
+                Bad / sum(Bad),
+                log((All - Bad) / sum(All - Bad) / (Bad / sum(Bad)))),
+          by = Value]
+
+  df[, `:=`(IV = sum((`Distribution Good` - `Distribution Bad`) * WoE)), by = Variable]
+
+  # Replace infinite WoE values with 0
+  df[is.infinite(df$WoE), WoE := 0]
+
+  df <- df[order(Variable, Value)]
+  
+  if (pr) {
+    print(df[Value %in% unique_values])
+    cat("IV =", sum(df$IV, na.rm = TRUE), "\n")
+  }
+
+  iv = sum(df$IV, na.rm = TRUE)
+  cat("This variable's IV is:", iv, "\n")
+
+  return(list(IV = iv, Data = df))
+}
+
+# Assuming new_data is your dataframe and target is the dependent variable
+# If target is not present, replace it with the actual name of your dependent variable column
+new_data <- data.frame(...)  # Replace ... with your data
+
+# Replace missing values with "NULL"
+new_data[is.na(new_data[[feature]]), feature] <- "NULL"
+
+# Calculate Information Value (IV)
+result <- calc_iv(new_data, 'Gender', 'target', pr = TRUE)
+iv <- result$IV
+data <- result$Data
+
+```
+
+```{r}
+convert_dummy <- function(df, feature, rank = 1) {
+# Create dummy variables for the specified feature
+dummies <- model.matrix(~ factor(df[[feature]]) - 1)
+  
+# Find the most frequent category in the original feature
+mode <- names(sort(table(df[[feature]], decreasing = TRUE))[rank])
+  
+# Create the label for the biggest category
+biggest <- paste0(feature, "_", mode)
+  
+# Drop the dummy variable corresponding to the biggest category
+dummies <- dummies[, -which(colnames(dummies) == biggest)]
+  
+# Drop the original categorical feature from the DataFrame
+df <- df[, -which(names(df) == feature)]
+  
+# Join the DataFrame with the new dummy variables
+df <- cbind(df, dummies)
+  
+return(df)
+}
+
+```
+
+```{r}
+get_category <- function(df, col, binsnum, labels, qcut = FALSE) {
+  if (qcut) {
+    localdf <- cut(df[[col]], breaks = quantile(df[[col]], probs = seq(0, 1, 1/binsnum)), labels = labels)  # Quantile cut
+  } else {
+    localdf <- cut(df[[col]], breaks = binsnum, labels = labels)  # Equal-length cut
+  }
+
+  localdf <- as.data.frame(localdf)
+  name <- paste0("gp_", col)
+  localdf[[name]] <- localdf[[col]]
+  df[[name]] <- as.character(localdf[[name]])
+  df[[name]] <- factor(df[[name]])
+  
+  return(df)
+}
+
+```
+
+```{r}
+plot_confusion_matrix <- function(cm, classes, normalize = FALSE, title = 'Confusion matrix', cmap = heat.colors) {
+  if (normalize) {
+    cm <- cm / rowSums(cm)
+  }
+  
+  print(cm)
+  
+  image <- heatmap(cm, col = cmap, main = title, xlab = 'Predicted label', ylab = 'True label', symm = TRUE, scale = 'none')
+  
+  tick_marks <- 1:nrow(cm)
+  axis(1, at = tick_marks, labels = colnames(cm), las = 2, cex.axis = 0.7)
+  axis(2, at = tick_marks, labels = rownames(cm), las = 2, cex.axis = 0.7)
+  
+  fmt <- ifelse(normalize, '.2f', 'd')
+  thresh <- max(cm) / 2
+  
+  for (i in 1:nrow(cm)) {
+    for (j in 1:ncol(cm)) {
+      text(j, i, sprintf(fmt, cm[i, j]), col = ifelse(cm[i, j] > thresh, 'white', 'black'), cex = 0.7)
+    }
+  }
+}
+
+```
+
+Gender
+
+```{r}
+# Replace 'F' with 0 and 'M' with 1 in the 'Gender' column
+new_data$gender = ifelse(new_data$gender == 'F',0,1 )
+# Print the count of each unique value in the 'Gender' column
+table(new_data$gender)
+# Calculate Information Value (IV)
+result <- calc_iv(new_data, 'Gender', 'target')
+iv <- result$IV
+data <- result$Data
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+```
